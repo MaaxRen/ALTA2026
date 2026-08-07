@@ -1,6 +1,6 @@
 # ALTA 2026 — BESSTIE
 
-Internal workshop project using the `unswnlporg/BESSTIE` dataset. The work focuses on the `en_AU` and `en_UK` subsets and jointly predicts:
+ALTA workshop project (https://www.alta.asn.au/events/sharedtask2026/) using the `unswnlporg/BESSTIE` dataset. The work focuses on the `en_AU` and `en_UK` subsets and jointly predicts:
 
 - sentiment: negative or positive
 - sarcasm: not sarcastic or sarcastic
