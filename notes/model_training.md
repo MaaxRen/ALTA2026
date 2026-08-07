@@ -168,38 +168,45 @@ Each head uses `hidden_size -> hidden_size // 2 -> 2`, with GELU and dropout aft
 the hidden layer. Their outputs use separate directories ending in
 `_adaptive_minvariety_mlp`.
 
-## Six-run comparison
+## Ten-run comparison
 
-All values are three-seed means on the untouched test set.
+Values are means over the three shared splits (2026–2028) on the untouched test
+set. This keeps all five strategies directly comparable.
 
 | ID | Backbone model | Training strategy | F1 sentiment en AU | F1 sentiment en UK | F1 sarcasm en AU | F1 sarcasm en UK | Score |
 |---|---|---|---:|---:|---:|---:|---:|
-| R1 | RoBERTa | Full FT, static, linear heads | 0.9132 | 0.9497 | 0.7670 | 0.6445 | 0.7789 |
-| R2 | RoBERTa | Full FT, adaptive, linear heads | 0.9152 | 0.9445 | 0.7362 | 0.6508 | 0.7830 |
-| R3 | RoBERTa | Full FT, adaptive, MLP heads | 0.9090 | 0.9410 | 0.7647 | 0.6809 | 0.7949 |
-| Q1 | Qwen3-Embedding-0.6B | LoRA, static, linear heads | 0.9206 | 0.9497 | 0.7774 | 0.6699 | 0.7953 |
-| Q2 | Qwen3-Embedding-0.6B | LoRA, adaptive, linear heads | 0.9195 | 0.9567 | 0.7543 | 0.6874 | **0.8034** |
-| Q3 | Qwen3-Embedding-0.6B | LoRA, adaptive, MLP heads | 0.9133 | 0.9575 | 0.7339 | 0.6930 | 0.8031 |
+| R1 | RoBERTa | Baseline, full FT | 0.9132 | 0.9497 | 0.7670 | 0.6445 | 0.7789 |
+| R2 | RoBERTa | Adaptive weighting, full FT | 0.9152 | 0.9445 | 0.7362 | 0.6508 | 0.7830 |
+| R3 | RoBERTa | Adaptive weighting + MLP, full FT | 0.9090 | 0.9410 | 0.7647 | 0.6809 | 0.7949 |
+| R4 | RoBERTa | Group DRO, full FT | 0.9135 | 0.9480 | 0.7468 | 0.6721 | 0.7928 |
+| R5 | RoBERTa | Separate task models, full FT | 0.9133 | 0.9488 | 0.7344 | 0.6892 | **0.8012** |
+| Q1 | Qwen3-Embedding-0.6B | Baseline, LoRA | 0.9206 | 0.9497 | 0.7774 | 0.6699 | 0.7953 |
+| Q2 | Qwen3-Embedding-0.6B | Adaptive weighting, LoRA | 0.9195 | 0.9567 | 0.7543 | 0.6874 | 0.8034 |
+| Q3 | Qwen3-Embedding-0.6B | Adaptive weighting + MLP, LoRA | 0.9133 | 0.9575 | 0.7339 | 0.6930 | 0.8031 |
+| Q4 | Qwen3-Embedding-0.6B | Group DRO, LoRA | 0.9231 | 0.9489 | 0.7426 | 0.7016 | **0.8123** |
+| Q5 | Qwen3-Embedding-0.6B | Separate task models, LoRA | 0.9196 | 0.9462 | 0.7183 | 0.6839 | 0.8015 |
 
 Key findings:
 
-- Qwen adaptive linear and MLP are effectively tied.
-- RoBERTa benefits most from adaptive MLP heads: +0.0160 over static.
-- en_AU sentiment and en_UK sarcasm are always the score minima.
-- en_UK sarcasm remains the main bottleneck.
-- Qwen results vary more across splits than RoBERTa results.
+- Qwen Group DRO is best overall: 0.8123, +0.0170 over Qwen baseline.
+- Separate-task RoBERTa is best for RoBERTa: 0.8012, +0.0223 over baseline.
+- Group DRO improves the weak en_UK sarcasm component for both backbones.
+- Separate-task Qwen is unstable across all five available splits: 0.7876 ± 0.0280.
+- Five-split means: RoBERTa separate 0.8042; Qwen Group DRO 0.8037;
+  RoBERTa Group DRO 0.7967; Qwen separate 0.7876.
+- Sentiment remains easier than sarcasm; en_UK sarcasm is the main bottleneck.
 
 Comparability:
 
-- Equal: 5 epochs, effective batch 16, splits, seeds, max length 256, dropout
-  0.1, weight decay 0.01, warmup 0.1, and BF16 configuration.
+- Equal in the primary comparison: seeds 2026–2028, 5 epochs, effective batch
+  16, max length 256, dropout 0.1, weight decay 0.01, warmup 0.1, and BF16.
 - Model-specific: RoBERTa full fine-tuning at `2e-5`; Qwen LoRA at `2e-4`.
-- Static and adaptive runs intentionally differ in loss and checkpoint metric.
-- A clean weighting ablation still needs static variety balancing with
-  minimum-score selection.
+- Strategies differ in objective, head, checkpoint selection, or backbone
+  sharing, so they are system comparisons rather than isolated ablations.
 
 Plots and reproducible analysis code are in
-`notebooks/training_results_analysis.ipynb`.
+`notebooks/training_results_analysis.ipynb`. Primary plots use common seeds;
+five-seed stability is shown separately for Group DRO and separate-task runs.
 
 ## Hyperparameter tuning
 
