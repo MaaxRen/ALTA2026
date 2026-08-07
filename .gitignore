@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Envs
+.venv/
+venv/
+ENV/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Tool and test caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local scratch files and rendered intermediates
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HPC output and crash dumps
+slurm-*.out
+slurm-*.err
+*.out
+*.err
+core
+core.*
+
+# Experiment trackers and logs
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+logs/
+
+# Data / artifacts (keep structure, not contents)
+data/**/*
+!data/**/.gitkeep
+!data/besstie/
+!data/besstie/**/
+!data/besstie/**/*.csv
+
+model_checkpoints/**/*
+!model_checkpoints/**/.gitkeep
+
+training_summary/**/*
+!training_summary/**/.gitkeep
+
+# Large local pretrained model weights
+resources/pretrained_model/
+
+# Model weights and generated binary artifacts outside standard directories
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+pytorch_model*.bin
+adapter_model*.bin
+*.joblib
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.arrow
+*.parquet
+
+# Hugging Face caches
+.huggingface/
+huggingface_cache/
+hf_cache/
+datasets_cache/
