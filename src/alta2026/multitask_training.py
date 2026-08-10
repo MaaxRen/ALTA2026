@@ -71,6 +71,10 @@ class TrainingConfig:
     save_model_checkpoint: bool = True
     early_stopping_patience: int | None = None
     group_dro_step_size: float = 0.01
+    search_sarcasm_thresholds: bool = False
+    sarcasm_threshold_min: float = 0.01
+    sarcasm_threshold_max: float = 0.99
+    sarcasm_threshold_steps: int = 99
 
 
 class MultitaskDataCollator:
@@ -449,12 +453,127 @@ def _metrics_for_mask(
     return metrics
 
 
+def search_sarcasm_thresholds_by_variety(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    subset_ids: np.ndarray,
+    minimum: float = 0.01,
+    maximum: float = 0.99,
+    steps: int = 99,
+) -> dict[str, float]:
+    """Choose each variety's validation threshold by sarcasm macro-F1."""
+    if not 0.0 < minimum < maximum < 1.0:
+        raise ValueError("Sarcasm threshold bounds must lie strictly between 0 and 1.")
+    if steps < 2:
+        raise ValueError("sarcasm_threshold_steps must be at least two.")
+    candidates = np.linspace(minimum, maximum, steps)
+    thresholds: dict[str, float] = {}
+    for subset_id, subset in ID_TO_SUBSET.items():
+        mask = subset_ids == subset_id
+        if not mask.any():
+            raise ValueError(f"No validation examples found for {subset}.")
+        scores = np.asarray(
+            [
+                f1_score(
+                    labels[mask],
+                    probabilities[mask] >= threshold,
+                    labels=[0, 1],
+                    average="macro",
+                    zero_division=0,
+                )
+                for threshold in candidates
+            ]
+        )
+        best_candidates = candidates[np.isclose(scores, scores.max())]
+        thresholds[subset] = float(
+            best_candidates[np.argmin(np.abs(best_candidates - 0.5))]
+        )
+    return thresholds
+
+
+def _sarcasm_predictions_from_thresholds(
+    probabilities: np.ndarray,
+    subset_ids: np.ndarray,
+    thresholds: dict[str, float],
+) -> np.ndarray:
+    if set(thresholds) != set(SUBSETS):
+        raise ValueError(f"Expected thresholds for {SUBSETS}; received {thresholds}.")
+    predictions = np.zeros(len(probabilities), dtype=np.int64)
+    for subset_id, subset in ID_TO_SUBSET.items():
+        threshold = float(thresholds[subset])
+        if not 0.0 < threshold < 1.0:
+            raise ValueError(f"Invalid sarcasm threshold for {subset}: {threshold}")
+        mask = subset_ids == subset_id
+        predictions[mask] = probabilities[mask] >= threshold
+    return predictions
+
+
+def _all_metrics(
+    arrays: dict[str, np.ndarray],
+    sentiment_predictions: np.ndarray,
+    sarcasm_predictions: np.ndarray,
+) -> dict[str, float]:
+    all_examples = np.ones(len(sentiment_predictions), dtype=bool)
+    metrics = _metrics_for_mask(
+        "overall",
+        all_examples,
+        arrays["sentiment_labels"],
+        sentiment_predictions,
+        arrays["sarcasm_labels"],
+        sarcasm_predictions,
+    )
+    for subset_id, subset in ID_TO_SUBSET.items():
+        metrics.update(
+            _metrics_for_mask(
+                subset,
+                arrays["subset_id"] == subset_id,
+                arrays["sentiment_labels"],
+                sentiment_predictions,
+                arrays["sarcasm_labels"],
+                sarcasm_predictions,
+            )
+        )
+    for source_id, source in ID_TO_SOURCE.items():
+        metrics.update(
+            _metrics_for_mask(
+                source,
+                arrays["source_id"] == source_id,
+                arrays["sentiment_labels"],
+                sentiment_predictions,
+                arrays["sarcasm_labels"],
+                sarcasm_predictions,
+            )
+        )
+    metrics["overall_mean_macro_f1"] = (
+        metrics["overall_sentiment_macro_f1"]
+        + metrics["overall_sarcasm_macro_f1"]
+    ) / 2.0
+    metrics["selection_score"] = (
+        min(
+            metrics["en_AU_sentiment_macro_f1"],
+            metrics["en_UK_sentiment_macro_f1"],
+        )
+        + min(
+            metrics["en_AU_sarcasm_macro_f1"],
+            metrics["en_UK_sarcasm_macro_f1"],
+        )
+    ) / 2.0
+    return metrics
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
+    sarcasm_thresholds: dict[str, float] | None = None,
+    search_sarcasm_thresholds: bool = False,
+    threshold_minimum: float = 0.01,
+    threshold_maximum: float = 0.99,
+    threshold_steps: int = 99,
 ) -> dict[str, float]:
+    if search_sarcasm_thresholds and sarcasm_thresholds is not None:
+        raise ValueError("Cannot search for and apply fixed thresholds together.")
     model.eval()
     gathered: dict[str, list[torch.Tensor]] = {
         "sentiment_logits": [],
@@ -489,47 +608,50 @@ def evaluate(
 
     arrays = {key: torch.cat(values).numpy() for key, values in gathered.items()}
     sentiment_predictions = arrays["sentiment_logits"].argmax(axis=1)
-    sarcasm_predictions = arrays["sarcasm_logits"].argmax(axis=1)
-    all_examples = np.ones(len(sentiment_predictions), dtype=bool)
-    metrics = _metrics_for_mask(
-        "overall",
-        all_examples,
-        arrays["sentiment_labels"],
-        sentiment_predictions,
-        arrays["sarcasm_labels"],
-        sarcasm_predictions,
+    default_sarcasm_predictions = arrays["sarcasm_logits"].argmax(axis=1)
+    default_metrics = _all_metrics(
+        arrays, sentiment_predictions, default_sarcasm_predictions
     )
+    if not search_sarcasm_thresholds and sarcasm_thresholds is None:
+        return default_metrics
 
-    for subset_id, subset in ID_TO_SUBSET.items():
-        metrics.update(
-            _metrics_for_mask(
-                subset,
-                arrays["subset_id"] == subset_id,
-                arrays["sentiment_labels"],
-                sentiment_predictions,
-                arrays["sarcasm_labels"],
-                sarcasm_predictions,
-            )
+    shifted_logits = arrays["sarcasm_logits"] - arrays["sarcasm_logits"].max(
+        axis=1, keepdims=True
+    )
+    exponentiated = np.exp(shifted_logits)
+    sarcasm_probabilities = exponentiated[:, 1] / exponentiated.sum(axis=1)
+    if search_sarcasm_thresholds:
+        sarcasm_thresholds = search_sarcasm_thresholds_by_variety(
+            probabilities=sarcasm_probabilities,
+            labels=arrays["sarcasm_labels"],
+            subset_ids=arrays["subset_id"],
+            minimum=threshold_minimum,
+            maximum=threshold_maximum,
+            steps=threshold_steps,
         )
-    for source_id, source in ID_TO_SOURCE.items():
-        metrics.update(
-            _metrics_for_mask(
-                source,
-                arrays["source_id"] == source_id,
-                arrays["sentiment_labels"],
-                sentiment_predictions,
-                arrays["sarcasm_labels"],
-                sarcasm_predictions,
-            )
-        )
-
-    metrics["overall_mean_macro_f1"] = (
-        metrics["overall_sentiment_macro_f1"] + metrics["overall_sarcasm_macro_f1"]
-    ) / 2.0
-    metrics["selection_score"] = (
-        min(metrics["en_AU_sentiment_macro_f1"], metrics["en_UK_sentiment_macro_f1"])
-        + min(metrics["en_AU_sarcasm_macro_f1"], metrics["en_UK_sarcasm_macro_f1"])
-    ) / 2.0
+    if sarcasm_thresholds is None:
+        raise RuntimeError("Threshold evaluation requested without thresholds.")
+    sarcasm_predictions = _sarcasm_predictions_from_thresholds(
+        sarcasm_probabilities, arrays["subset_id"], sarcasm_thresholds
+    )
+    metrics = _all_metrics(arrays, sentiment_predictions, sarcasm_predictions)
+    for subset in SUBSETS:
+        metrics[f"sarcasm_threshold_{subset}"] = float(sarcasm_thresholds[subset])
+        metrics[f"default_threshold_{subset}_sarcasm_macro_f1"] = default_metrics[
+            f"{subset}_sarcasm_macro_f1"
+        ]
+    metrics["default_threshold_overall_sarcasm_macro_f1"] = default_metrics[
+        "overall_sarcasm_macro_f1"
+    ]
+    metrics["default_threshold_overall_mean_macro_f1"] = default_metrics[
+        "overall_mean_macro_f1"
+    ]
+    metrics["default_threshold_selection_score"] = default_metrics[
+        "selection_score"
+    ]
+    metrics["threshold_selection_score_gain"] = (
+        metrics["selection_score"] - default_metrics["selection_score"]
+    )
     return metrics
 
 
@@ -598,6 +720,13 @@ def train_multitask(
         raise ValueError("early_stopping_patience must be at least one or None.")
     if config.group_dro_step_size < 0.0:
         raise ValueError("group_dro_step_size must be non-negative.")
+    if config.search_sarcasm_thresholds:
+        if not 0.0 < config.sarcasm_threshold_min < config.sarcasm_threshold_max < 1.0:
+            raise ValueError(
+                "Sarcasm threshold search bounds must lie strictly between 0 and 1."
+            )
+        if config.sarcasm_threshold_steps < 2:
+            raise ValueError("sarcasm_threshold_steps must be at least two.")
     device = select_device()
     use_mixed_precision = device.type == "cuda" and config.mixed_precision != "no"
     autocast_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
@@ -796,7 +925,15 @@ def train_multitask(
                 learning_rate=f"{scheduler.get_last_lr()[0]:.2e}",
             )
 
-        metrics = evaluate(model, validation_loader, device)
+        metrics = evaluate(
+            model,
+            validation_loader,
+            device,
+            search_sarcasm_thresholds=config.search_sarcasm_thresholds,
+            threshold_minimum=config.sarcasm_threshold_min,
+            threshold_maximum=config.sarcasm_threshold_max,
+            threshold_steps=config.sarcasm_threshold_steps,
+        )
         weights_used = {
             task: {
                 subset: float(weights[subset_id])
@@ -806,9 +943,15 @@ def train_multitask(
         }
         next_variety_weights = variety_weights
         if adaptive_weighting and epoch < config.epochs:
+            adaptive_metrics = dict(metrics)
+            if config.search_sarcasm_thresholds:
+                for subset in SUBSETS:
+                    adaptive_metrics[f"{subset}_sarcasm_macro_f1"] = metrics[
+                        f"default_threshold_{subset}_sarcasm_macro_f1"
+                    ]
             next_variety_weights = {
                 task: update_adaptive_variety_weights(
-                    metrics=metrics,
+                    metrics=adaptive_metrics,
                     task=task,
                     current_weights=variety_weights[task],
                     beta=config.adaptive_weight_beta,
@@ -920,7 +1063,20 @@ def train_multitask(
                             device=parameter.device, dtype=parameter.dtype
                         )
                     )
-        test_metrics = evaluate(model, test_loader, device)
+        selected_sarcasm_thresholds = None
+        if config.search_sarcasm_thresholds:
+            selected_sarcasm_thresholds = {
+                subset: float(
+                    best_validation_metrics[f"sarcasm_threshold_{subset}"]
+                )
+                for subset in SUBSETS
+            }
+        test_metrics = evaluate(
+            model,
+            test_loader,
+            device,
+            sarcasm_thresholds=selected_sarcasm_thresholds,
+        )
 
     summary_dir = Path(config.summary_dir)
     summary_dir.mkdir(parents=True, exist_ok=True)
@@ -930,6 +1086,16 @@ def train_multitask(
             {
                 "selected_epoch": best_epoch,
                 "best_validation_score": best_score,
+                "selected_sarcasm_thresholds": (
+                    {
+                        subset: best_validation_metrics[
+                            f"sarcasm_threshold_{subset}"
+                        ]
+                        for subset in SUBSETS
+                    }
+                    if config.search_sarcasm_thresholds
+                    else None
+                ),
                 "validation_metrics": best_validation_metrics,
             },
             indent=2,
@@ -974,6 +1140,14 @@ def train_multitask(
         "test_metrics": test_metrics,
         "history": history,
         "parameter_counts": parameter_counts,
+        "selected_sarcasm_thresholds": (
+            {
+                subset: best_validation_metrics[f"sarcasm_threshold_{subset}"]
+                for subset in SUBSETS
+            }
+            if config.search_sarcasm_thresholds
+            else None
+        ),
     }
 
 
