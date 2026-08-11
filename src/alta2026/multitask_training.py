@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
 import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable, Literal
 
 import numpy as np
@@ -19,6 +23,23 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizerBase, get_linear_schedule_with_warmup
+
+
+OFFICIAL_SCORER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "resources"
+    / "alta_official"
+    / "alta_2026_scoring_program"
+    / "evaluate.py"
+)
+_OFFICIAL_SPEC = importlib.util.spec_from_file_location(
+    "alta_2026_official_evaluate", OFFICIAL_SCORER_PATH
+)
+if _OFFICIAL_SPEC is None or _OFFICIAL_SPEC.loader is None:
+    raise ImportError(f"Could not load official scorer: {OFFICIAL_SCORER_PATH}")
+_OFFICIAL_MODULE = importlib.util.module_from_spec(_OFFICIAL_SPEC)
+_OFFICIAL_SPEC.loader.exec_module(_OFFICIAL_MODULE)
+official_evaluate = _OFFICIAL_MODULE.evaluate
 
 SUBSETS = ("en_AU", "en_UK")
 SUBSET_TO_ID = {name: index for index, name in enumerate(SUBSETS)}
@@ -453,6 +474,39 @@ def _metrics_for_mask(
     return metrics
 
 
+def official_scores_from_arrays(
+    varieties: np.ndarray,
+    sentiment_labels: np.ndarray,
+    sentiment_predictions: np.ndarray,
+    sarcasm_labels: np.ndarray,
+    sarcasm_predictions: np.ndarray,
+) -> tuple[dict[str, float], float]:
+    """Pass in-memory predictions to the organiser's file-based evaluator."""
+    gold = pd.DataFrame(
+        {
+            "variety": varieties,
+            "sentiment": sentiment_labels,
+            "sarcasm": sarcasm_labels,
+        }
+    )
+    run = pd.DataFrame(
+        {
+            "variety": varieties,
+            "sentiment": sentiment_predictions,
+            "sarcasm": sarcasm_predictions,
+        }
+    )
+    with TemporaryDirectory(prefix="alta2026_score_") as temporary_dir:
+        temporary_path = Path(temporary_dir)
+        gold_path = temporary_path / "truth.csv"
+        run_path = temporary_path / "answer.csv"
+        gold.to_csv(gold_path, index=False)
+        run.to_csv(run_path, index=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            scores, final_score = official_evaluate(run_path, gold_path)
+    return ({key: float(value) for key, value in scores.items()}, float(final_score))
+
+
 def search_sarcasm_thresholds_by_variety(
     probabilities: np.ndarray,
     labels: np.ndarray,
@@ -548,16 +602,25 @@ def _all_metrics(
         metrics["overall_sentiment_macro_f1"]
         + metrics["overall_sarcasm_macro_f1"]
     ) / 2.0
-    metrics["selection_score"] = (
-        min(
-            metrics["en_AU_sentiment_macro_f1"],
-            metrics["en_UK_sentiment_macro_f1"],
-        )
-        + min(
-            metrics["en_AU_sarcasm_macro_f1"],
-            metrics["en_UK_sarcasm_macro_f1"],
-        )
-    ) / 2.0
+    varieties = np.asarray(
+        [ID_TO_SUBSET[int(value)].replace("_", "-") for value in arrays["subset_id"]]
+    )
+    official_scores, final_score = official_scores_from_arrays(
+        varieties,
+        arrays["sentiment_labels"],
+        sentiment_predictions,
+        arrays["sarcasm_labels"],
+        sarcasm_predictions,
+    )
+    metrics.update(
+        {
+            "en_AU_sentiment_macro_f1": official_scores["sentiment-en-AU"],
+            "en_UK_sentiment_macro_f1": official_scores["sentiment-en-UK"],
+            "en_AU_sarcasm_macro_f1": official_scores["sarcasm-en-AU"],
+            "en_UK_sarcasm_macro_f1": official_scores["sarcasm-en-UK"],
+            "selection_score": final_score,
+        }
+    )
     return metrics
 
 

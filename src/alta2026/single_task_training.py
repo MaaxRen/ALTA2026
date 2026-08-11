@@ -27,6 +27,7 @@ from alta2026.multitask_training import (
     seed_everything,
     select_device,
     balanced_subtask_class_weights,
+    official_scores_from_arrays,
     weighted_subtask_cross_entropy,
 )
 
@@ -141,9 +142,17 @@ def evaluate_single_task(
         metrics.update(metrics_for_mask(subset, subset_array == subset_id))
     for source_id, source in ID_TO_SOURCE.items():
         metrics.update(metrics_for_mask(source, source_array == source_id))
-    metrics["selection_score"] = min(
-        metrics["en_AU_macro_f1"], metrics["en_UK_macro_f1"]
+    varieties = np.asarray([ID_TO_SUBSET[int(value)] for value in subset_array])
+    official_scores, official_task_score = official_scores_from_arrays(
+        varieties,
+        labels_array,
+        predictions,
+        labels_array,
+        predictions,
     )
+    for subset, dialect in (("en_AU", "en-AU"), ("en_UK", "en-UK")):
+        metrics[f"{subset}_macro_f1"] = official_scores[f"{task}-{dialect}"]
+    metrics["selection_score"] = official_task_score
     return metrics
 
 
