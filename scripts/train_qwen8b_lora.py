@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Baseline LoRA training for Qwen3-Embedding-8B with two linear heads."""
+
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from alta2026.qwen_lora_experiment import (  # noqa: E402
+    QwenLoraExperimentSettings,
+    run_qwen_lora_experiment,
+)
+
+# Edit this configuration block before submitting the HPC job.
+SETTINGS = QwenLoraExperimentSettings(
+    model_name=REPO_ROOT / "resources" / "pretrained_model" / "qwen3-embedding-8b",
+    data_dir=REPO_ROOT / "data" / "besstie",
+    output_dir=REPO_ROOT / "model_checkpoints" / "qwen_embedding_8b_multitask_lora",
+    summary_dir=REPO_ROOT / "training_summary" / "runs" / "qwen_embedding_8b_multitask_lora",
+    split_seeds=(2026, 2027, 2028, 2029, 2030),
+    method="qwen8b_lora_all_linear_baseline",
+    loss_weighting="task_class",
+    selection_metric="overall_mean_macro_f1",
+    epochs=5,
+    train_batch_size=8,
+    eval_batch_size=16,
+    gradient_accumulation_steps=1,
+    learning_rate=2e-4,
+    weight_decay=0.01,
+    warmup_ratio=0.1,
+    max_length=256,
+    dropout=0.1,
+    mixed_precision="bf16",
+    gradient_checkpointing=True,
+    lora_r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    attention_implementation="sdpa",
+)
+
+
+if __name__ == "__main__":
+    run_qwen_lora_experiment(SETTINGS)

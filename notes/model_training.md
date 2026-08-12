@@ -168,10 +168,19 @@ Each head uses `hidden_size -> hidden_size // 2 -> 2`, with GELU and dropout aft
 the hidden layer. Their outputs use separate directories ending in
 `_adaptive_minvariety_mlp`.
 
-## Ten-run comparison
+### Qwen3-Embedding-8B experiments
+
+- `scripts/train_qwen8b_lora.py`
+- `scripts/train_qwen8b_lora_adaptive.py`
+- `scripts/train_qwen8b_lora_group_dro.py`
+
+These use linear heads, LoRA, seeds 2026–2030, training batch 8, evaluation
+batch 16, and no gradient accumulation.
+
+## Ten-run common-seed comparison
 
 Values are means over the three shared splits (2026–2028) on the untouched test
-set. This keeps all five strategies directly comparable.
+set. Qwen 8B is excluded here and reported only with its completed five splits below.
 
 | ID | Backbone model | Training strategy | F1 sentiment en AU | F1 sentiment en UK | F1 sarcasm en AU | F1 sarcasm en UK | Score |
 |---|---|---|---:|---:|---:|---:|---:|
@@ -185,28 +194,44 @@ set. This keeps all five strategies directly comparable.
 | Q3 | Qwen3-Embedding-0.6B | Adaptive weighting + MLP, LoRA | 0.9133 | 0.9575 | 0.7339 | 0.6930 | 0.8031 |
 | Q4 | Qwen3-Embedding-0.6B | Group DRO, LoRA | 0.9231 | 0.9489 | 0.7426 | 0.7016 | **0.8123** |
 | Q5 | Qwen3-Embedding-0.6B | Separate task models, LoRA | 0.9196 | 0.9462 | 0.7183 | 0.6839 | 0.8015 |
-
 Key findings:
 
-- Qwen Group DRO is best overall: 0.8123, +0.0170 over Qwen baseline.
+- Qwen 0.6B Group DRO remains its best strategy: 0.8123, +0.0170 over baseline.
 - Separate-task RoBERTa is best for RoBERTa: 0.8012, +0.0223 over baseline.
-- Group DRO improves the weak en_UK sarcasm component for both backbones.
+- Group DRO improves en_UK sarcasm for RoBERTa and Qwen 0.6B.
 - Separate-task Qwen is unstable across all five available splits: 0.7876 ± 0.0280.
 - Five-split means: RoBERTa separate 0.8042; Qwen Group DRO 0.8037;
   RoBERTa Group DRO 0.7967; Qwen separate 0.7876.
 - Sentiment remains easier than sarcasm; en_UK sarcasm is the main bottleneck.
 
+### Qwen 8B five-split results
+
+Values are means over seeds 2026–2030.
+
+| ID | Backbone model | Training strategy | F1 sentiment en AU | F1 sentiment en UK | F1 sarcasm en AU | F1 sarcasm en UK | Score |
+|---|---|---|---:|---:|---:|---:|---:|
+| Q8-1 | Qwen3-Embedding-8B | Baseline, LoRA | 0.9213 | 0.9594 | 0.7872 | 0.7245 | 0.8229 |
+| Q8-2 | Qwen3-Embedding-8B | Adaptive weighting, LoRA | 0.8791 | 0.9266 | 0.7323 | 0.6854 | 0.7822 |
+| Q8-3 | Qwen3-Embedding-8B | Group DRO, LoRA | 0.9230 | 0.9610 | 0.7835 | 0.7340 | **0.8285** |
+
+- Group DRO is best: 0.8285 ± 0.0147, +0.0056 over baseline.
+- Baseline scores 0.8229 ± 0.0163; seed 2030 lowers its mean.
+- Adaptive weighting remains unstable: 0.7822 ± 0.0596, range 0.7134–0.8501.
+- en_UK sarcasm remains the limiting component.
+
 Comparability:
 
-- Equal in the primary comparison: seeds 2026–2028, 5 epochs, effective batch
-  16, max length 256, dropout 0.1, weight decay 0.01, warmup 0.1, and BF16.
+- Equal in the primary comparison: seeds 2026–2028, 5 epochs, max length 256,
+  dropout 0.1, weight decay 0.01, warmup 0.1, and BF16.
+- RoBERTa and Qwen 0.6B use effective batch 16; Qwen 8B uses batch 8 without
+  accumulation. The size comparison is therefore not a pure scaling ablation.
 - Model-specific: RoBERTa full fine-tuning at `2e-5`; Qwen LoRA at `2e-4`.
 - Strategies differ in objective, head, checkpoint selection, or backbone
   sharing, so they are system comparisons rather than isolated ablations.
 
 Plots and reproducible analysis code are in
 `notebooks/training_results_analysis.ipynb`. Primary plots use common seeds;
-five-seed stability is shown separately for Group DRO and separate-task runs.
+five-seed stability and the complete Qwen 8B comparison are shown separately.
 
 ## Hyperparameter tuning
 
@@ -281,3 +306,38 @@ The shared model retains two heads. For each task, Group DRO:
 
 Epoch histories record `group_dro_weights`. Artifacts use `*_group_dro`
 directories.
+
+## Approaches to try / to-do
+
+### Sarcasm thresholds by variety
+
+- Status: implemented for Qwen3-Embedding-0.6B baseline, adaptive weighting,
+  and Group DRO.
+- Entry points end in `*_threshold_search.py` under `scripts/`.
+- Search thresholds from `0.01` to `0.99` separately for `en_AU` and `en_UK`
+  using validation sarcasm macro-F1 at every epoch.
+- Select the checkpoint with threshold-adjusted validation metrics, then apply
+  that epoch's frozen thresholds once to the untouched test set.
+- Record the default-0.5 metrics, selected thresholds, and threshold score gain
+  in the run summaries.
+- Do not tune source-specific thresholds: British Google sarcasm has too few
+  positive examples for a stable estimate.
+
+### Increase the sarcasm task weight
+
+- Replace the fixed 50/50 task loss with a validation-tuned allocation.
+- Initial sarcasm weights to compare: `0.6`, `0.7`, and `0.8`.
+- Keep checkpoint selection based on the final minimum-variety score.
+- Compare against 50/50 weighting on the same splits and seeds.
+
+### Intermediate sarcasm training on SARC
+
+- Stage a local copy of the Self-Annotated Reddit Corpus for offline HPC use.
+- Deduplicate normalized SARC text against all BESSTIE splits before training.
+- First train the sarcasm adapter/head on a balanced SARC subset, then continue
+  fine-tuning on BESSTIE.
+- Treat SARC labels as noisy because they are self-annotated; compare subset
+  sizes and avoid letting SARC dominate the BESSTIE fine-tuning stage.
+- Select the SARC subset size and intermediate-training duration using BESSTIE
+  validation results only.
+- Compare against the same model trained directly on BESSTIE.
